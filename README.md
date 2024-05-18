@@ -4,12 +4,12 @@ Tested on a few android flutter apps (e.g., Google Ads, naver Knowledge iN, ì‚¼ì
 
 # Usage
 ```
-1. Set up burp invisible proxy on the host machine<br>
+1. Set up burp invisible proxy on the host machine
 ```
 ![image](https://github.com/hackcatml/frida-flutterproxy/assets/75507443/26692c67-4273-4e1b-814e-3af7c445caa3)
 
 ```
-2. Specifiy burp ip and port on the script<br>
+2. Specifiy burp ip and port on the script
 At the very end of the script.js, specifiy BURP_PROXY_IP and BURP_PROXY_PORT
 ```
 ![image](https://github.com/hackcatml/frida-flutterproxy/assets/75507443/bc17b35b-a644-4b53-9dc7-8b76984585d2)
