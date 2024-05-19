@@ -4,7 +4,8 @@ var appId = null;
 var BURP_PROXY_IP = null;
 var BURP_PROXY_PORT = null;
 
-var libflutter_base = null;
+var flutter_base = null;
+var flutter_size = null;
 
 var PT_LOAD_rodata_p_memsz = null;
 var PT_LOAD_text_p_vaddr = null;
@@ -12,8 +13,16 @@ var PT_LOAD_text_p_memsz = null;
 var PT_GNU_RELRO_p_vaddr = null;
 var PT_GNU_RELRO_p_memsz = null;
 
+var TEXT_segment_text_section_offset = null;
+var TEXT_segment_text_section_size = null;
+var TEXT_segment_cstring_section_offset = null;
+var TEXT_segment_cstring_section_size = null;
+var DATA_segment_const_section_offset = null;
+var DATA_segment_const_section_size = null;
+
 var ssl_client_string_pattern_found_addr = null;
 var verify_cert_chain_func_addr = null;
+var verify_peer_cert_func_addr = null;
 
 var Socket_CreateConnect_string_pattern_found_addr = null;
 var Socket_CreateConnect_func_addr = null;
@@ -25,14 +34,23 @@ var sockaddr = null;
 /* Util functions */
 // Find application package name
 function findAppId() {
-    var pm = Java.use('android.app.ActivityThread').currentApplication();
-    return pm.getApplicationContext().getPackageName();
+    if (Process.platform === "linux") {
+        var pm = Java.use('android.app.ActivityThread').currentApplication();
+        return pm.getApplicationContext().getPackageName();
+    } else {
+        return ObjC.classes.NSBundle.mainBundle().bundleIdentifier().toString();
+    }
 }
 
 // Convert hex to byte string
 function convertHexToByteString(hexString) {
     // Remove the '0x' prefix
     let cleanHexString = hexString.startsWith('0x') ? hexString.slice(2) : hexString;
+
+    // Pad with a leading zero if the length is odd
+    if (cleanHexString.length % 2 !== 0) {
+        cleanHexString = '0' + cleanHexString;
+    }
 
     // Split the string into pairs of two characters
     let byteArray = cleanHexString.match(/.{1,2}/g);
@@ -107,7 +125,11 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
                         }
                     }
                 }
-            } 
+            }
+            else if (for_what == "verify_peer_cert_func_addr") {
+                verify_peer_cert_func_addr = address;
+                console.log(`[*] Found verify_peer_cert function address: ${verify_peer_cert_func_addr}`);
+            }
             else if (for_what == "Socket_CreateConnect") {
                 Socket_CreateConnect_string_pattern_found_addr = address;
                 console.log(`[*] Socket_CreateConnect string pattern found at: ${address}`);
@@ -155,12 +177,22 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
                     // alibaba.com adrp add pattern is different
                     adrp_add_pattern = "?9 ?? ?? ?0 ?? ?? ?? ?? 29 ?? ?? 91";
                 }
-                scanMemory(libflutter_base.add(PT_LOAD_text_p_vaddr), PT_LOAD_text_p_memsz, adrp_add_pattern, "ssl_client_adrp_add");
+                if (Process.platform === 'linux') {
+                    scanMemory(flutter_base.add(PT_LOAD_text_p_vaddr), PT_LOAD_text_p_memsz, adrp_add_pattern, "ssl_client_adrp_add");
+                }
+                else if (Process.platform === 'darwin') {
+                    scanMemory(flutter_base.add(TEXT_segment_text_section_offset), TEXT_segment_text_section_size, adrp_add_pattern, "ssl_client_adrp_add");
+                }
             } 
             // Scan "Socket_CreateConnect" string pattern found address on the .data.rel.ro section to find the address of "Socket_CreateConnect" function
             else if (for_what == "Socket_CreateConnect" && Socket_CreateConnect_string_pattern_found_addr != null) {
                 var addr_to_find = convertHexToByteString(Socket_CreateConnect_string_pattern_found_addr.toString());
-                scanMemory(libflutter_base.add(PT_GNU_RELRO_p_vaddr), PT_GNU_RELRO_p_memsz, addr_to_find, "Socket_CreateConnect_func_addr");
+                if (Process.platform === 'linux') {
+                    scanMemory(flutter_base.add(PT_GNU_RELRO_p_vaddr), PT_GNU_RELRO_p_memsz, addr_to_find, "Socket_CreateConnect_func_addr");
+                }
+                else if (Process.platform === 'darwin') {
+                    scanMemory(flutter_base.add(DATA_segment_const_section_offset), DATA_segment_const_section_size, addr_to_find, "Socket_CreateConnect_func_addr");
+                }
             }
             console.log("[*] scan memory done");
         }
@@ -397,6 +429,71 @@ function parseElf(base) {
 }
 /* Parsing elf function */
 
+/* Parsing MachO function */
+function parseMachO(base) {
+    base = ptr(base)
+    var magic = base.readU32();
+    var is64bit = false;
+    if (magic == 0xfeedfacf) {
+        is64bit = true;
+        var number_of_commands_offset = 0x10
+        var command_size_offset = 0x4
+        var segment_name_offset = 0x8
+        var vm_address_offset = 0x18
+        var vm_size_offset = 0x20
+        var file_offset = 0x28
+        var number_of_sections_offset = 0x40
+        var section64_header_base_offset = 0x48
+        var section64_header_size = 0x50
+    } else {
+        console.log('Unknown magic:' + magic);
+    }
+    var cmdnum = base.add(number_of_commands_offset).readU32();
+    // send({'parseMachO': {'cmdnum': cmdnum}})
+    var cmdoff = is64bit ? 0x20 : 0x1C;
+    for (var i = 0; i < cmdnum; i++) {
+        var cmd = base.add(cmdoff).readU32();
+        var cmdsize = base.add(cmdoff + command_size_offset).readU32();
+        if (cmd === 0x19) { // SEGMENT_64
+            var segname = base.add(cmdoff + segment_name_offset).readUtf8String();
+            var vmaddr = base.add(cmdoff + vm_address_offset).readU32();
+            var vmsize = base.add(cmdoff + vm_size_offset).readU32();
+            var fileoffset = base.add(cmdoff + file_offset).readU32();
+            var nsects = base.add(cmdoff + number_of_sections_offset).readU8();
+            var secbase = base.add(cmdoff + section64_header_base_offset);
+
+            if (base.add(cmdoff + command_size_offset).readU32() >= section64_header_base_offset + nsects * section64_header_size) {
+                var TEXT_segment_text_section_index = 0;
+                var TEXT_segment_cstring_section_index = 0;
+                var DATA_segment_const_section_index = 0;
+                for (var i = 0; i < nsects; i++) {
+                    var secname = secbase.add(i * section64_header_size).readUtf8String()
+                    var section_start_offset = secbase.add(i * section64_header_size + 0x30).readU32();                        
+
+                    if (segname === '__TEXT' && secname === '__text') {
+                        TEXT_segment_text_section_index = i;
+                        TEXT_segment_text_section_offset = section_start_offset;
+                    } else if (segname === '__TEXT' && i == (TEXT_segment_text_section_index + 1)) {
+                        TEXT_segment_text_section_size = section_start_offset - TEXT_segment_text_section_offset;
+                    } else if (segname === '__TEXT' && secname === '__cstring') {
+                        TEXT_segment_cstring_section_index = i;
+                        TEXT_segment_cstring_section_offset = section_start_offset;
+                    } else if (segname === '__TEXT' && i == (TEXT_segment_cstring_section_index + 1)) {
+                        TEXT_segment_cstring_section_size = section_start_offset - TEXT_segment_cstring_section_offset;
+                    } else if (segname === '__DATA' && secname === '__const') {
+                        DATA_segment_const_section_index = i;
+                        DATA_segment_const_section_offset = section_start_offset;
+                    } else if (segname === '__DATA' && i == (DATA_segment_const_section_index + 1)) {
+                        DATA_segment_const_section_size = section_start_offset - DATA_segment_const_section_offset;
+                    }
+                }
+            }
+        }
+        cmdoff += cmdsize;
+    }
+}
+/* Parsing MachO function */
+
 /* Hook flutter engine function to capture the network traffic */
 function hook(target) {
     if (target == "GetSockAddr") {
@@ -412,7 +509,15 @@ function hook(target) {
         Interceptor.attach(Module.findExportByName(null, "socket"), {
             onEnter: function(args) {
                 // AF_INET(IPv4) == 2, AF_INET6(IPv6) == 10
-                if (sockaddr != null && ptr(sockaddr).readU16() == 2) {
+                var overwrite = false;
+                if (Process.platform === 'linux' && sockaddr != null && ptr(sockaddr).readU16() == 2) {
+                    overwrite = true;
+                }
+                else if (Process.platform === 'darwin' && sockaddr != null && ptr(sockaddr).add(0x1).readU8() == 2) {
+                    overwrite = true;
+                }
+
+                if (overwrite) {
                     console.log(`[*] Overwrite sockaddr as our burp proxy ip and port --> ${BURP_PROXY_IP}:${BURP_PROXY_PORT}`);
                     ptr(sockaddr).add(0x2).writeU16(byteFlip(BURP_PROXY_PORT));
                     ptr(sockaddr).add(0x4).writeByteArray(convertIpToByteArray(BURP_PROXY_IP));
@@ -434,64 +539,103 @@ function hook(target) {
             }
         })
     }
+    else if (target == "verifyPeerCert") {
+        // Hook the verify_peer_cert function and replace it, so we can capture ssl traffic
+        // https://github.com/NVISOsecurity/disable-flutter-tls-verification/blob/ecc6e9ed9e1182645b32da68d7be6aefb2b7e970/disable-flutter-tls.js#L151
+        Interceptor.replace(verify_peer_cert_func_addr, new NativeCallback((pathPtr, flags) => {
+            console.log(`[*] verify peer cert bypass`);
+            return 0;
+        }, 'int', ['pointer', 'int']));
+    }
 }
 /* Hook flutter engine function to capture the network traffic */
 
 /* main */
-var awaitForCondition = function(callback) {
-    var module_loaded = 0;
-    var base = null;
-    var int = setInterval(function() {
-        Process.enumerateModulesSync()
-        .filter(function(m){ return m['path'].toLowerCase().indexOf('libflutter.so') != -1; })
-        .forEach(function(m) {
-            console.log("[*] libflutter.so loaded!");
-            base = Module.findBaseAddress('libflutter.so');
-            return module_loaded = 1;
-        })
-        if(module_loaded) {
-            clearInterval(int);
-            callback(+base);
-            return;
+var target_flutter_library = ObjC.available ? "Flutter.framework/Flutter" : (Java.available ? "libflutter.so" : null);
+if (target_flutter_library != null) { 
+    var awaitForCondition = function(callback) {
+        var module_loaded = 0;
+        var base = null;
+        var int = setInterval(function() {
+            Process.enumerateModulesSync()
+            .filter(function(m){ return m['path'].indexOf(target_flutter_library) != -1; })
+            .forEach(function(m) {
+                if (ObjC.available) {
+                    target_flutter_library = target_flutter_library.split('/').pop();
+                }
+                console.log(`[*] ${target_flutter_library} loaded!`);
+                base = Module.findBaseAddress(target_flutter_library);
+                return module_loaded = 1;
+            })
+            if(module_loaded) {
+                clearInterval(int);
+                callback(+base);
+                return;
+            }
+        }, 0);
+    }
+    
+    function init(base) {
+        flutter_base = ptr(base);
+        console.log(`[*] ${target_flutter_library} base: ${flutter_base}`);
+        if (Process.platform === 'linux') {
+            appId = findAppId();
+            console.log(`[*] package name: ${appId}`);    
         }
-    }, 0);
-}
 
-function init(base) {
-    libflutter_base = ptr(base);
-    console.log(`[*] libflutter.so base: ${libflutter_base}`);
-    appId = findAppId();
-    console.log(`[*] package name: ${appId}`);
-    parseElf(libflutter_base);
-    if (PT_LOAD_rodata_p_memsz != null) {
-        // "ssl_client" string scan from the libflutter base address to the right before the .text section
-        var pattern = '73 73 6C 5F 63 6C 69 65 6E 74 00';
-        scanMemory(libflutter_base, PT_LOAD_rodata_p_memsz, pattern, "ssl_client");
+        var ssl_client_string = '73 73 6C 5F 63 6C 69 65 6E 74 00';
+        var Socket_CreateConnect_string = '53 6f 63 6b 65 74 5f 43 72 65 61 74 65 43 6f 6e 6e 65 63 74 00';
+        if (Process.platform === 'linux') {
+            parseElf(flutter_base);
+            if (PT_LOAD_rodata_p_memsz != null) {
+                // "ssl_client" string scan from the libflutter base address to the right before the .text section
+                scanMemory(flutter_base, PT_LOAD_rodata_p_memsz, ssl_client_string, "ssl_client");
+                
+                // "Socket_CreateConnect" string scan
+                scanMemory(flutter_base, PT_LOAD_rodata_p_memsz, Socket_CreateConnect_string, "Socket_CreateConnect");
+            }
+        } 
+        else if (Process.platform === 'darwin') {
+            parseMachO(flutter_base);
+            // Thanks to NVISO, we can directly find the verify_peer_cert function address
+            // https://github.com/NVISOsecurity/disable-flutter-tls-verification/blob/ecc6e9ed9e1182645b32da68d7be6aefb2b7e970/disable-flutter-tls.js#L19
+            var verify_peer_cert_func_pattern = 'FF 83 01 D1 FA 67 01 A9 F8 5F 02 A9 F6 57 03 A9 F4 4F 04 A9 FD 7B 05 A9 FD 43 01 91 F? 03 00 AA ?? 0? 40 F9 ?8 1? 40 F9 15 ?? 4? F9 B5 00 00 B4';
+            scanMemory(flutter_base.add(TEXT_segment_text_section_offset), TEXT_segment_text_section_size, verify_peer_cert_func_pattern, "verify_peer_cert_func_addr");
+            scanMemory(flutter_base.add(TEXT_segment_cstring_section_offset), TEXT_segment_cstring_section_size, Socket_CreateConnect_string, "Socket_CreateConnect");
+        }
+    
+        var int_getSockAddr = setInterval(() => {
+            if (GetSockAddr_func_addr != null) {
+                console.log("[*] Hook GetSockAddr function");
+                hook("GetSockAddr");
+                clearInterval(int_getSockAddr);
+            }
+        }, 0);
         
-        // "Socket_CreateConnect" string scan
-        pattern = '53 6f 63 6b 65 74 5f 43 72 65 61 74 65 43 6f 6e 6e 65 63 74 00';
-        scanMemory(libflutter_base, PT_LOAD_rodata_p_memsz, pattern, "Socket_CreateConnect");
+        if (Process.platform === 'linux') {
+            var int_verifyCertBypass = setInterval(() => {
+                if (verify_cert_chain_func_addr != null) {
+                    console.log("[*] Hook verify_cert_chain function");
+                    hook("verifyCertChain");
+                    clearInterval(int_verifyCertBypass);
+                }
+            }, 0);
+        }
+        // On iOS, hooking verify_cert_chain doesn't work. Instead, hook verify_peer_cert
+        else if (Process.platform === 'darwin') {
+            var int_verifyPeerCertBypass = setInterval(() => {
+                if (verify_peer_cert_func_addr != null) {
+                    console.log("[*] Hook verify_peer_cert function");
+                    hook("verifyPeerCert");
+                    clearInterval(int_verifyPeerCertBypass);
+                }
+            }, 0);
+        }
     }
 
-    var int_getSockAddr = setInterval(() => {
-        if (GetSockAddr_func_addr != null) {
-            console.log("[*] Hook GetSockAddr function");
-            hook("GetSockAddr");
-            clearInterval(int_getSockAddr);
-        }
-    }, 0);
-    
-    var int_verifyCertBypass = setInterval(() => {
-        if (verify_cert_chain_func_addr != null) {
-            console.log("[*] Hook verify_cert_chain function");
-            hook("verifyCertChain");
-            clearInterval(int_verifyCertBypass);
-        }
-    }, 0);
+    BURP_PROXY_IP = "192.168.0.76";
+    BURP_PROXY_PORT = 8083;
+
+    awaitForCondition(init);
 }
-
-BURP_PROXY_IP = "192.168.0.76";
-BURP_PROXY_PORT = 8083;
-
-awaitForCondition(init);
 /* main */
