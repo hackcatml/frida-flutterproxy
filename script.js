@@ -411,7 +411,8 @@ function hook(target) {
         // Hook the socket function and replace the IP and port with our burp ones.
         Interceptor.attach(Module.findExportByName(null, "socket"), {
             onEnter: function(args) {
-                if ((sockaddr != null && ptr(sockaddr).readU16() == 2) || sockaddr != null && ptr(sockaddr).readU16() == 10) {
+                // AF_INET(IPv4) == 2, AF_INET6(IPv6) == 10
+                if (sockaddr != null && ptr(sockaddr).readU16() == 2) {
                     console.log(`[*] Overwrite sockaddr as our burp proxy ip and port --> ${BURP_PROXY_IP}:${BURP_PROXY_PORT}`);
                     ptr(sockaddr).add(0x2).writeU16(byteFlip(BURP_PROXY_PORT));
                     ptr(sockaddr).add(0x4).writeByteArray(convertIpToByteArray(BURP_PROXY_IP));
