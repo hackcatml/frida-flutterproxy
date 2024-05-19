@@ -1,6 +1,6 @@
 # frida-flutterproxy
 A Frida script for intercepting traffic on Android Flutter applications (aarch64 only)<br>
-Tested on a few android flutter apps (e.g., Google Ads, naver Knowledge iN, 삼쩜삼, BMW, Nubank,  Universal Studios hollywood, Demaecan)
+Tested on a few android flutter apps (e.g., Google Ads, Naver Blog, Naver Knowledge iN, 삼쩜삼, BMW, Nubank, Universal Studios hollywood, Demaecan)
 
 # Usage
 ```
