@@ -1,5 +1,6 @@
 /* Global variables */
 var appId = null;
+var appId_iOS = null;
 
 var BURP_PROXY_IP = null;
 var BURP_PROXY_PORT = null;
@@ -22,6 +23,7 @@ var DATA_segment_const_section_size = null;
 
 var ssl_client_string_pattern_found_addr = null;
 var verify_cert_chain_func_addr = null;
+var handshake_string_pattern_found_addr = null;
 var verify_peer_cert_func_addr = null;
 
 var Socket_CreateConnect_string_pattern_found_addr = null;
@@ -75,6 +77,16 @@ function convertIpToByteArray(ipString) {
     return byteArray;
 }
 
+// Convert ArrayBuffer to hex string
+function convertArrayBufferToHex(buffer) {
+    let hexArray = [];
+    let uint8Array = new Uint8Array(buffer);
+    for (let byte of uint8Array) {
+        hexArray.push(byte.toString(16).padStart(2, '0'));
+    }
+    return hexArray.join(' ');
+}
+
 // Byte flip
 function byteFlip(number) {
     // Extract the high and low bytes
@@ -109,7 +121,7 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
 
                     if (adrp != undefined && add != undefined && ptr(adrp).add(add).toString() == ssl_client_string_pattern_found_addr.toString()) {
                         console.log(`[*] Found adrp add address: ${address}`);
-                        // As we trace back, disassemble to find the address of the function to bypass the verify cert chain
+                        // As we trace back, disassemble to find the address of the verify_cert_chain function (https://blog.weghos.com/flutter/engine/third_party/boringssl/src/ssl/ssl_x509.cc.html#_ZN4bsslL41ssl_crypto_x509_session_verify_cert_chainEP14ssl_session_stPNS_13SSL_HANDSHAKEEPh)
                         for (let off = 0;; off += 4) {
                             disasm = Instruction.parse(address.sub(off));
                             if (disasm.mnemonic == "sub") {
@@ -126,9 +138,52 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
                     }
                 }
             }
-            else if (for_what == "verify_peer_cert_func_addr") {
-                verify_peer_cert_func_addr = address;
-                console.log(`[*] Found verify_peer_cert function address: ${verify_peer_cert_func_addr}`);
+            else if (for_what == "handshake") {
+                for (let off = 0;; off += 1) {
+                    var arrayBuff = new Uint8Array(ptr(address).sub(0x6).sub(off).readByteArray(6));
+                    var hexarray = convertArrayBufferToHex(arrayBuff);
+                    if (hexarray == "2e 2e 2f 2e 2e 2f") {  // "../../"
+                        handshake_string_pattern_found_addr = ptr(address).sub(0x6).sub(off);
+                        console.log(`[*] handshake string pattern found at: ${address}`);
+                        break;
+                    }
+                    else {
+                        continue;
+                    }
+                }
+                // Get the iOS app id. if it's too early app crashes when spawning the iOS flutter app. this location is safe.
+                appId_iOS = findAppId();
+            }
+            else if (for_what == "handshake_adrp_add") {
+                var adrp, add;
+                var disasm = Instruction.parse(address);
+                if (disasm.mnemonic == "adrp") {
+                    adrp = disasm.operands.find(op => op.type === 'imm')?.value;
+                    
+                    disasm = Instruction.parse(disasm.next);
+                    if (disasm.mnemonic != "add") {
+                        disasm = Instruction.parse(disasm.next);
+                    }
+                    add = disasm.operands.find(op => op.type === 'imm')?.value;
+
+                    if (adrp != undefined && add != undefined && ptr(adrp).add(add).toString() == handshake_string_pattern_found_addr.toString()) {
+                        console.log(`[*] Found adrp add address: ${address}`);
+                        // As we trace back, disassemble to find the address of the ssl_verify_peer_cert function (https://blog.weghos.com/flutter/engine/third_party/boringssl/src/ssl/handshake.cc.html#_ZN4bssl20ssl_verify_peer_certEPNS_13SSL_HANDSHAKEE)
+                        for (let off = 0;; off += 4) {
+                            disasm = Instruction.parse(address.sub(off));
+                            if (disasm.mnemonic == "sub") {
+                                disasm = Instruction.parse(disasm.next);
+                                if (disasm.mnemonic == "stp" || disasm.mnemonic == "str") {
+                                    verify_peer_cert_func_addr = address.sub(off);
+                                    console.log(`[*] Found verify_peer_cert function address: ${verify_peer_cert_func_addr}`);
+                                    break;
+                                }
+                            } else {
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
             else if (for_what == "Socket_CreateConnect") {
                 Socket_CreateConnect_string_pattern_found_addr = address;
@@ -174,16 +229,24 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
             if (for_what == "ssl_client" && ssl_client_string_pattern_found_addr != null) {
                 var adrp_add_pattern = "?9 ?? ?? ?0 29 ?? ?? 91";
                 if (appId == "com.alibaba.intl.android.apps.poseidon") {
-                    // alibaba.com adrp add pattern is different
+                    // alibaba.com (android) adrp add pattern is different
                     adrp_add_pattern = "?9 ?? ?? ?0 ?? ?? ?? ?? 29 ?? ?? 91";
                 }
-                if (Process.platform === 'linux') {
-                    scanMemory(flutter_base.add(PT_LOAD_text_p_vaddr), PT_LOAD_text_p_memsz, adrp_add_pattern, "ssl_client_adrp_add");
+                scanMemory(flutter_base.add(PT_LOAD_text_p_vaddr), PT_LOAD_text_p_memsz, adrp_add_pattern, "ssl_client_adrp_add");
+            }
+            else if (for_what == "handshake" && handshake_string_pattern_found_addr != null) {
+                var adrp_add_pattern = "?2 ?? 00 ?0 42 ?? ?? 91 00 02 80 52 21 22 80 52 c3 29 80 52";
+                // In case we don't get the iOS app id yet, try to get it again after 0.1 second. This happens when spawning the iOS Flutter app
+                if (appId_iOS == null) {
+                    Thread.sleep(0.1);
+                    appId_iOS = findAppId();
                 }
-                else if (Process.platform === 'darwin') {
-                    scanMemory(flutter_base.add(TEXT_segment_text_section_offset), TEXT_segment_text_section_size, adrp_add_pattern, "ssl_client_adrp_add");
+                if (appId_iOS == "com.alibaba.sourcing") {
+                    // alibaba.com (iOS) adrp add pattern is different
+                    adrp_add_pattern = "?3 ?? 00 ?0 63 ?? ?? 91 00 02 80 52 01 00 80 52 22 22 80 52 84 25 80 52"
                 }
-            } 
+                scanMemory(flutter_base.add(TEXT_segment_text_section_offset), TEXT_segment_text_section_size, adrp_add_pattern, "handshake_adrp_add");
+            }
             // Scan "Socket_CreateConnect" string pattern found address on the .data.rel.ro section to find the address of "Socket_CreateConnect" function
             else if (for_what == "Socket_CreateConnect" && Socket_CreateConnect_string_pattern_found_addr != null) {
                 var addr_to_find = convertHexToByteString(Socket_CreateConnect_string_pattern_found_addr.toString());
@@ -585,22 +648,21 @@ if (target_flutter_library != null) {
 
         var ssl_client_string = '73 73 6C 5F 63 6C 69 65 6E 74 00';
         var Socket_CreateConnect_string = '53 6f 63 6b 65 74 5f 43 72 65 61 74 65 43 6f 6e 6e 65 63 74 00';
+        // "third_party/boringssl/src/ssl/handshake.cc" string. First, Scan this string and then need to find the start address of "../../"
+        var handshake_string = '74 68 69 72 64 5f 70 61 72 74 79 2f 62 6f 72 69 6e 67 73 73 6c 2f 73 72 63 2f 73 73 6c 2f 68 61 6e 64 73 68 61 6b 65 2e 63 63';
         if (Process.platform === 'linux') {
             parseElf(flutter_base);
             if (PT_LOAD_rodata_p_memsz != null) {
                 // "ssl_client" string scan from the libflutter base address to the right before the .text section
                 scanMemory(flutter_base, PT_LOAD_rodata_p_memsz, ssl_client_string, "ssl_client");
-                
                 // "Socket_CreateConnect" string scan
                 scanMemory(flutter_base, PT_LOAD_rodata_p_memsz, Socket_CreateConnect_string, "Socket_CreateConnect");
             }
         } 
         else if (Process.platform === 'darwin') {
             parseMachO(flutter_base);
-            // Thanks to NVISO, we can directly find the verify_peer_cert function address
-            // https://github.com/NVISOsecurity/disable-flutter-tls-verification/blob/ecc6e9ed9e1182645b32da68d7be6aefb2b7e970/disable-flutter-tls.js#L19
-            var verify_peer_cert_func_pattern = 'FF 83 01 D1 FA 67 01 A9 F8 5F 02 A9 F6 57 03 A9 F4 4F 04 A9 FD 7B 05 A9 FD 43 01 91 F? 03 00 AA ?? 0? 40 F9 ?8 1? 40 F9 15 ?? 4? F9 B5 00 00 B4';
-            scanMemory(flutter_base.add(TEXT_segment_text_section_offset), TEXT_segment_text_section_size, verify_peer_cert_func_pattern, "verify_peer_cert_func_addr");
+            // Find verify_peer_cert function address by scanning "third_party/boringssl/src/ssl/handshake.cc" string
+            scanMemory(flutter_base.add(TEXT_segment_cstring_section_offset), TEXT_segment_cstring_section_size, handshake_string, "handshake");
             scanMemory(flutter_base.add(TEXT_segment_cstring_section_offset), TEXT_segment_cstring_section_size, Socket_CreateConnect_string, "Socket_CreateConnect");
         }
     
