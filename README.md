@@ -4,6 +4,7 @@ Tested on a few flutter apps (e.g., Google Ads, Naver Blog, Naver Knowledge iN, 
 What does this script do? memory scan and hook some functions. check my [blog post](https://hackcatml.tistory.com/197)!
 
 # Usage
+You don't need to configure iptables for Android or OpenVPN for iOS. Just follow the steps below.
 ```
 1. Set up burp invisible proxy on the host machine
 ```
