@@ -22,6 +22,9 @@ frida -Uf <package name> -l script.js
 ```
 ![Screen Recording 2024-05-18 at 9 51 25 PM](https://github.com/hackcatml/frida-flutterproxy/assets/75507443/16f82ac8-2431-41b4-92c3-be2af0302f1f)
 
+# Contact
+- Channel: https://t.me/hackcatml1<br>
+- Chat: https://t.me/hackcatmlchat
 
 # Credits
 [reflutter](https://github.com/Impact-I/reFlutter)<br>
