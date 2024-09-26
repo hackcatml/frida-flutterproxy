@@ -1,5 +1,5 @@
 # frida-flutterproxy
-A Frida script for intercepting traffic on Android, iOS Flutter applications (arm64 only)<br>
+A Frida script for intercepting traffic on Android, iOS Flutter applications (arm64, x86_64)<br>
 Tested on a few flutter apps (e.g., Google Ads, Naver Blog, Naver Knowledge iN, 삼쩜삼, BMW, Nubank(Android), Universal Studios hollywood, Demaecan(Android), Alibaba.com)<br>
 What does this script do? memory scan and hook some functions. check my [blog post](https://hackcatml.tistory.com/197)!
 
