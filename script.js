@@ -138,6 +138,40 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
                     }
                 }
             }
+            else if (for_what == "ssl_client_lea_rdi_rip") {
+                /* opcode
+                    lea rdi, [rip - 0xabcd]
+                */
+                var rdi, rip, disp;
+                var disasm = Instruction.parse(address);
+                if (disasm.mnemonic == "lea") {
+                    rip = disasm.next;
+                    disp = disasm.operands.find(op => op.type === 'mem')?.value.disp;
+                    rdi = rip.add(disp);
+
+                    if (rip != undefined && rdi != undefined && ptr(rdi).toString() == ssl_client_string_pattern_found_addr.toString()) {
+                        console.log(`[*] Found lea rdi rip address: ${address}`);
+                        // As we trace back, disassemble to find the address of the verify_cert_chain function (https://blog.weghos.com/flutter/engine/third_party/boringssl/src/ssl/ssl_x509.cc.html#_ZN4bsslL41ssl_crypto_x509_session_verify_cert_chainEP14ssl_session_stPNS_13SSL_HANDSHAKEEPh)
+                        for (let off = 0;; off += 1) {
+                            try {
+                                disasm = Instruction.parse(address.sub(off));
+                                if (disasm.mnemonic == "push" && disasm.opStr == "rbp") {
+                                    if (Instruction.parse(disasm.next) != 'push r15') {
+                                        continue;
+                                    }
+                                    verify_cert_chain_func_addr = address.sub(off);
+                                    console.log(`[*] Found verify_cert_chain function address: ${verify_cert_chain_func_addr}`);
+                                    break; 
+                                } else {
+                                    continue;
+                                } 
+                            } catch (error) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
             else if (for_what == "handshake") {
                 for (let off = 0;; off += 1) {
                     var arrayBuff = new Uint8Array(ptr(address).sub(0x6).sub(off).readByteArray(6));
@@ -192,7 +226,7 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
             else if (for_what == "Socket_CreateConnect_func_addr") {
                 Socket_CreateConnect_func_addr = address.sub(0x10).readPointer();
                 console.log(`[*] Found Socket_CreateConnect function address: ${Socket_CreateConnect_func_addr}`);
-                /*
+                /* arm64
                     Socket_CreateConnect function looks like this.
                     SUB             SP, SP, #0xD0
                     STR             X30, [SP,#0xD0+var_30]
@@ -207,32 +241,78 @@ function scanMemory(scan_start_addr, scan_size, pattern, for_what) {
                     MOV             X0, X19
                     BL              sub_89E20C
                 */
-                
-                var bl_count = 0;
-                for (let off = 0;; off += 4) {
-                    let disasm = Instruction.parse(Socket_CreateConnect_func_addr.add(off));
-                    if (disasm.mnemonic == "bl") {
-                        bl_count++;
-                        if (bl_count == 2) {
-                            GetSockAddr_func_addr = ptr(disasm.operands.find(op => op.type === 'imm')?.value);
-                            console.log(`[*] Found GetSockAddr function address: ${GetSockAddr_func_addr}`);
-                            break;
-                        } else {
+
+                /* x64
+                    push            rbp
+                    push            r15
+                    push            r14
+                    push            r13
+                    push            r12
+                    push            rbx
+                    sub             rsp, 498h
+                    mov             rbx, rdi
+                    mov             esi, 1
+                    call            sub_AB2790
+                    lea             rsi, [rsp+4C8h+addr]
+                    mov             rdi, rax
+                    call            sub_8EEB50  <---------------- branch to GetSockAddr function
+                    mov             rdi, rbx
+                    mov             esi, 2
+                    call            sub_AB2790
+                */
+               
+                if (Process.arch == 'arm64') {
+                    var bl_count = 0;
+                    for (let off = 0;; off += 4) {
+                        let disasm = Instruction.parse(Socket_CreateConnect_func_addr.add(off));
+                        if (disasm.mnemonic == "bl") {
+                            bl_count++;
+                            if (bl_count == 2) {
+                                GetSockAddr_func_addr = ptr(disasm.operands.find(op => op.type === 'imm')?.value);
+                                console.log(`[*] Found GetSockAddr function address: ${GetSockAddr_func_addr}`);
+                                break;
+                            } else {
+                                continue;
+                            }
+                        }
+                    } 
+                } else if (Process.arch == 'x64') {
+                    var call_count = 0;
+                    for (let off = 0;; off += 1) 
+                    {
+                        try {
+                            let disasm = Instruction.parse(Socket_CreateConnect_func_addr.add(off));
+                            if (disasm.mnemonic == "call") {
+                                call_count++;
+                                if (call_count == 2) {
+                                    GetSockAddr_func_addr = ptr(disasm.operands.find(op => op.type === 'imm')?.value);
+                                    console.log(`[*] Found GetSockAddr function address: ${GetSockAddr_func_addr}`);
+                                    break;
+                                } else {
+                                    continue;
+                                }
+                            }
+                        } catch (error) {
                             continue;
                         }
                     }
-                }
+                }               
             }
         }, 
         onComplete: function(){
             // Scan adrp add opcode on the .text section to find the function which has "ssl_client" string
             if (for_what == "ssl_client" && ssl_client_string_pattern_found_addr != null) {
-                var adrp_add_pattern = "?9 ?? ?? ?0 29 ?? ?? 91";
-                if (appId == "com.alibaba.intl.android.apps.poseidon") {
-                    // alibaba.com (android) adrp add pattern is different
-                    adrp_add_pattern = "?9 ?? ?? ?0 ?? ?? ?? ?? 29 ?? ?? 91";
+                if (Process.arch == 'arm64') {
+                    var adrp_add_pattern = "?9 ?? ?? ?0 29 ?? ?? 91";
+                    if (appId == "com.alibaba.intl.android.apps.poseidon") {
+                        // alibaba.com (android) adrp add pattern is different
+                        adrp_add_pattern = "?9 ?? ?? ?0 ?? ?? ?? ?? 29 ?? ?? 91";
+                    }
+                    scanMemory(flutter_base.add(PT_LOAD_text_p_vaddr), PT_LOAD_text_p_memsz, adrp_add_pattern, "ssl_client_adrp_add");
+                } else if (Process.arch == 'x64') {
+                    var lea_rdi_rip_pattern = "48 8d 3d ?? ?? ?? FF";
+                    scanMemory(flutter_base.add(PT_LOAD_text_p_vaddr), PT_LOAD_text_p_memsz, lea_rdi_rip_pattern, "ssl_client_lea_rdi_rip");
                 }
-                scanMemory(flutter_base.add(PT_LOAD_text_p_vaddr), PT_LOAD_text_p_memsz, adrp_add_pattern, "ssl_client_adrp_add");
             }
             else if (for_what == "handshake" && handshake_string_pattern_found_addr != null) {
                 var adrp_add_pattern = "?2 ?? 00 ?0 42 ?? ?? 91 00 02 80 52 21 22 80 52 c3 29 80 52";
@@ -695,7 +775,7 @@ if (target_flutter_library != null) {
         }
     }
 
-    BURP_PROXY_IP = "192.168.0.76";
+    BURP_PROXY_IP = "192.168.1.20";
     BURP_PROXY_PORT = 8083;
 
     awaitForCondition(init);
