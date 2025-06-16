@@ -380,7 +380,7 @@ var p_types = {
 
 function getExportFunction(name, ret, args) {
     var funcPtr;
-    funcPtr = Module.findExportByName(null, name);
+    funcPtr = Module.getGlobalExportByName(name);
     if (funcPtr === null) {
         console.log("cannot find " + name);
         return null;
@@ -649,7 +649,7 @@ function hook(target) {
             onLeave: function(retval) {}
         })
         // Hook the socket function and replace the IP and port with our burp ones.
-        Interceptor.attach(Module.findExportByName(null, "socket"), {
+        Interceptor.attach(Module.getGlobalExportByName("socket"), {
             onEnter: function(args) {
                 // AF_INET(IPv4) == 2, AF_INET6(IPv6) == 10
                 var overwrite = false;
@@ -700,14 +700,14 @@ if (target_flutter_library != null) {
         var module_loaded = 0;
         var base = null;
         var int = setInterval(function() {
-            Process.enumerateModulesSync()
+            Process.enumerateModules()
             .filter(function(m){ return m['path'].indexOf(target_flutter_library) != -1; })
             .forEach(function(m) {
                 if (ObjC.available) {
                     target_flutter_library = target_flutter_library.split('/').pop();
                 }
                 console.log(`[*] ${target_flutter_library} loaded!`);
-                base = Module.findBaseAddress(target_flutter_library);
+                base = Process.getModuleByName(target_flutter_library).base;
                 return module_loaded = 1;
             })
             if(module_loaded) {
@@ -775,8 +775,8 @@ if (target_flutter_library != null) {
         }
     }
 
-    BURP_PROXY_IP = "192.168.1.20";
-    BURP_PROXY_PORT = 8083;
+    BURP_PROXY_IP = "10.0.2.2";
+    BURP_PROXY_PORT = 8080;
 
     awaitForCondition(init);
 }
